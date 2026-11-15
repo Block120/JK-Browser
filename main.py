@@ -24,46 +24,74 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QApplication, QLineEdit, QMainWindow, QStyle, QToolBar, QTabWidget, QWidget, QVBoxLayout, QLabel, QPushButton
+from pathlib import Path
+from PyQt6.QtCore import QObject, pyqtSlot
+from PyQt6.QtWebChannel import QWebChannel
+from PyQt6.QtWebEngineCore import QWebEnginePage
 
 import tlds
 import qdarktheme
+from settings_bridge import SettingsBridge
+
+class SettingsPage(QWebEnginePage):
+    def __init__(self, settings_url, parent=None):
+        super().__init__(parent)
+        self.settings_url = settings_url
+
+    def acceptNavigationRequest(self, url, navigation_type, is_main_frame):
+        return is_main_frame and url == self.settings_url
 
 # Create a main window class
 class MainWindow(QMainWindow):
-    confFile = open("browser.conf", 'rt')
-    confText = confFile.read()
-    uvLockFile = open("uv.lock", 'rt')
-    uvLockText = uvLockFile.read()
+    def setupBrowser(self):
+        confFile = open("browser.conf", 'rt')
+        confText = confFile.read()
+        uvLockFile = open("uv.lock", 'rt')
+        uvLockText = uvLockFile.read()
+
+        if "searchEngine = 'Google (google.com)'" in confText or "searchEngine = " not in confText:
+            self.defaultSearchEngine = "google"
+            self.defaultEngineSearchUrl = "google.com/search?q="
+        elif "searchEngine = 'Yahoo (yahoo.com)" in confText:
+            self.defaultSearchEngine = "yahoo"
+            self.defaultEngineSearchUrl = 'search.yahoo.com/search?p='
+        self.confText = confText
+        self.uvLockText = uvLockText
     # Constructor of this class
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setWindowTitle("JK-Browser")
+        self.setupBrowser()
         # To provide a widget for viewing and editing web documents:
         self.browser = QWebEngineView()
+
+        self.normal_page = QWebEnginePage(self)
+        self.browser.setPage(self.normal_page)
+
+        settings_path = Path(__file__).resolve().parent / "settings.html"
+        self.settings_url = QUrl.fromLocalFile(str(settings_path))
+        self.settings_page = SettingsPage(self.settings_url, self)
+
+        self.settings_bridge = SettingsBridge(self)
+        self.settings_channel = QWebChannel(self.settings_page)
+        self.settings_channel.registerObject("settings", self.settings_bridge)
+        self.settings_page.setWebChannel(self.settings_channel)
+
+
         self.devtools_window = None
         # Bind F12 key to toggle Developer Tools panel
         self.devtools_shortcut = QShortcut(QKeySequence("F12"), self)
         self.devtools_shortcut.activated.connect(self.toggle_developer_tools)
-        # tabs
-        self.totalTabNum = 0
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         mainLayout = QVBoxLayout(central_widget)
+        mainLayout.addWidget(self.browser)
 
-        self.newTabBtn = QPushButton("+")
-        self.newTabBtn.clicked.connect(self.addNewDynamicTab)
-        mainLayout.addWidget(self.newTabBtn)
-
-        self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
-        self.tabs.tabCloseRequested.connect(self.closeTab)
-        mainLayout.addWidget(self.tabs)
-        self.addNewDynamicTab()
         # To set default browser homepage as google homepage:
-        if "searchEngine = 'google'" in self.confText or "searchEngine = " not in self.confText:
-            self.browser.setUrl(QUrl("http://www.google.com"))
-        elif "searchEngine = 'yahoo'" in self.confText:
-            self.browser.setUrl(QUrl("http://yahoo.com"))
+        if self.defaultSearchEngine == "google":
+            self.browser.setUrl(QUrl("https://www.google.com"))
+        elif self.defaultSearchEngine == "yahoo":
+            self.browser.setUrl(QUrl("https://yahoo.com"))
         # To set browser as central widget of main window:
         # To open browser in a maximized window:
         self.showMaximized()
@@ -80,7 +108,7 @@ class MainWindow(QMainWindow):
             'Back',
             self,
         )
-        back_btn.triggered.connect(self.browser.back)
+        back_btn.triggered.connect(self.go_back)
         navbar.addAction(back_btn)
 
         # To add forward button within navigation bar:
@@ -103,43 +131,32 @@ class MainWindow(QMainWindow):
         navbar.addWidget(self.url_bar)
         self.browser.urlChanged.connect(self.update_url)
 
-    def addNewDynamicTab(self):
-        self.totalTabNum += 1
-        pageWidget = QWidget()
-        pageLayout = QVBoxLayout(pageWidget)
-        pageLayout.addStretch()
-        index = self.tabs.addTab(pageWidget, f'tab {self.totalTabNum}')
-        self.tabs.setCurrentIndex(index)
-
-    def closeTab(self, index):
-        tabToDelete = self.tabs.widget(index)
-        if tabToDelete is not None:
-            self.tabs.removeTab(index)
-            tabToDelete.deleteLater()
-
     def checkIfURL(self, url):
         if "jk-browser://" in url or "jk-b://" in url:
             if url == "jk-browser://exit" or url == "jk-b://exit":
                 QApplication.quit()
-                return "quit"
+                return "exit"
             elif url == "jk-browser://version" or url == "jk-b://version":
                 return "version"
+            elif url == "jk-browser://settings" or url == "jk-b://settings":
+                return "settings"
         if " " in url or "." not in url:
-            if "searchEngine = 'google'" in self.confText or "searchEngine = " not in self.confText:
-                return f'https://google.com/search?q={url}'
-            elif "searchEngine = 'yahoo'" in self.confText:
-                return f'https://search.yahoo.com/search?p={url}'
+            return self.defaultEngineSearchUrl + url
         elif " " not in url and "." in url:
             return url
 
     # To navigate to desired URL specified within URL bar:
     def open_url(self):
         url = self.url_bar.text()
-        urlValid = self.checkIfURL(url)
+        urlValid = str(self.checkIfURL(url))
         url = urlValid
         if url == "exit":
             return
-        elif url == "version":
+        if url == "settings":
+            self.showSettings()
+            return
+        self.browser.setPage(self.normal_page)
+        if url == "version":
             version = ""
             if self.uvLockText.find("version = ") != -1:
                 version = self.uvLockText[self.uvLockText.find("version = ")+10:self.uvLockText.find("revision")-1]
@@ -167,14 +184,22 @@ class MainWindow(QMainWindow):
                 </html>
                 """)
             return
-        if "http://" not in str(url) and "https://" not in str(url):
-            self.browser.setUrl(QUrl("http://" + str(url)))
+        if "http://" not in url and "https://" not in url:
+            self.browser.setUrl(QUrl("https://" + url))
         else:
             self.browser.setUrl(QUrl(url))
 
+    def showSettings(self):
+        self.browser.setPage(self.settings_page)
+        self.browser.setUrl(self.settings_url)
+        self.url_bar.setText("jk-b://settings")
+
     # To update the URL bar contents when navigated from one page to another:
     def update_url(self, q):
-        self.url_bar.setText(q.toString())
+        if self.browser.page() is self.settings_page:
+            self.url_bar.setText("jk-b://settings")
+        else:
+            self.url_bar.setText(q.toString())
 
     def toggle_developer_tools(self):
         if self.devtools_window and self.devtools_window.isVisible():
@@ -192,6 +217,13 @@ class MainWindow(QMainWindow):
         # Link current page to the inspection engine
         self.browser.page().setDevToolsPage(inspector_view.page())
         self.devtools_window.show()
+
+    def go_back(self):
+        if self.browser.page() is self.settings_page:
+            self.browser.setPage(self.normal_page)
+            self.update_url(self.normal_page.url())
+        else:
+            self.browser.back()
 
 
 # To call constructor of the C++ class QApplication:
